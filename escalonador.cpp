@@ -24,9 +24,9 @@ struct Processo {
     int tempoChegada;
     int tempoRetorno;
     int tempoBloqueado;
-    int quantumConsumido;
+    int quantumConsumido;      // usado apenas para debug, mas não essencial agora
     bool finalizado;
-    bool naFila;
+    bool naFila;               // indica se já foi inserido na fila de prontos na chegada
 
     Processo(int _id, string _nome, vector<int> _paginas, int _tempoChegada = 0)
         : id(_id), nome(_nome), paginas(_paginas), paginaAtual(0), pageFaults(0),
@@ -38,7 +38,7 @@ struct Frame {
     int pagina;
     int ultimoUso;
     int processoId;
-    Frame() : pagina(-1), ultimoUso(-1), processoId(-1) {}
+    Frame() : pagina(-1), ultimoUso(-1) {}
 };
 
 // ============================================================================
@@ -55,21 +55,26 @@ public:
         ram.resize(frames);
     }
 
-    bool paginaNaRam(int pagina, int processoId) {
-        for (const auto& frame : ram)
-            if (frame.pagina == pagina && frame.processoId == processoId)
-                return true;
-        return false;
+    bool paginaNaRam(int pagina)
+    {
+    for (const auto& frame : ram)
+        if (frame.pagina == pagina)
+            return true;
+
+    return false;
     }
 
-    void atualizarUso(int pagina, int processoId, int tempoAtual) {
+    void atualizarUso(int pagina, int tempoAtual)
+    {
         for (auto& frame : ram)
-            if (frame.pagina == pagina && frame.processoId == processoId) {
+        {
+            if (frame.pagina == pagina)
+            {
                 frame.ultimoUso = tempoAtual;
                 return;
             }
+        }
     }
-
     int encontrarFrameLivre() {
         for (int i = 0; i < quantidadeFrames; i++)
             if (ram[i].pagina == -1) return i;
@@ -79,30 +84,35 @@ public:
     int encontrarPaginaLRU() {
         int indiceLRU = 0, menorTempo = ram[0].ultimoUso;
         for (int i = 1; i < quantidadeFrames; i++)
-            if (ram[i].ultimoUso < menorTempo) { menorTempo = ram[i].ultimoUso; indiceLRU = i; }
+            if (ram[i].ultimoUso < menorTempo) {
+                menorTempo = ram[i].ultimoUso;
+                indiceLRU = i;
+            }
         return indiceLRU;
     }
 
     // Retorna: {houve substituição, {página removida, processoId removido}}
-    pair<bool, pair<int,int>> carregarPagina(int pagina, int processoId, int tempoAtual) {
+    pair<bool,int> carregarPagina(int pagina, int tempoAtual)
+    {
         int frameLivre = encontrarFrameLivre();
-        if (frameLivre != -1) {
-            ram[frameLivre].pagina     = pagina;
-            ram[frameLivre].processoId = processoId;
-            ram[frameLivre].ultimoUso  = tempoAtual;
-            return {false, {-1, -1}};
-        } else {
-            int indiceLRU     = encontrarPaginaLRU();
-            int paginaRemovida = ram[indiceLRU].pagina;
-            int procRemovido   = ram[indiceLRU].processoId;
-            ram[indiceLRU].pagina     = pagina;
-            ram[indiceLRU].processoId = processoId;
-            ram[indiceLRU].ultimoUso  = tempoAtual;
-            return {true, {paginaRemovida, procRemovido}};
+
+        if (frameLivre != -1)
+        {
+            ram[frameLivre].pagina = pagina;
+            ram[frameLivre].ultimoUso = tempoAtual;
+
+            return {false, -1};
         }
+
+        int indiceLRU = encontrarPaginaLRU();
+        int removida = ram[indiceLRU].pagina;
+
+        ram[indiceLRU].pagina = pagina;
+        ram[indiceLRU].ultimoUso = tempoAtual;
+
+        return {true, removida};
     }
 
-    // FIX: recebe mapa id->nome para exibir corretamente
     string estadoRam(const map<int,string>& nomes) {
         string estado = "RAM: [";
         for (int i = 0; i < quantidadeFrames; i++) {
@@ -110,8 +120,8 @@ public:
                 estado += "Vazio";
             else {
                 string nome = (nomes.count(ram[i].processoId)) ? nomes.at(ram[i].processoId)
-                                                                 : "P?";
-                estado += nome + ":Pg" + to_string(ram[i].pagina);
+                                                               : "P?";
+                estado += "Pg" + to_string(ram[i].pagina);
             }
             if (i < quantidadeFrames - 1) estado += " | ";
         }
@@ -122,7 +132,7 @@ public:
 };
 
 // ============================================================================
-// ESCALONADOR ROUND ROBIN
+// ESCALONADOR ROUND ROBIN (agora gerencia também a CPU atual)
 // ============================================================================
 
 class EscalonadorRR {
@@ -130,19 +140,60 @@ private:
     queue<int> filaProntos;
     list<int>  filaBloqueados;
     int quantum;
+    int processoAtual;      // -1 indica CPU ociosa
+    int quantumRestante;    // ticks restantes para o processo atual
 
 public:
-    EscalonadorRR(int q) : quantum(q) {}
+    EscalonadorRR(int q) : quantum(q), processoAtual(-1), quantumRestante(0) {}
 
-    void adicionarPronto(int processoId) { filaProntos.push(processoId); }
-
-    int proximoProcesso() {
-        if (filaProntos.empty()) return -1;
-        int id = filaProntos.front(); filaProntos.pop(); return id;
+    void adicionarPronto(int processoId) {
+        filaProntos.push(processoId);
     }
 
-    void bloquearProcesso(int processoId) { filaBloqueados.push_back(processoId); }
+    // Tenta escalonar um novo processo, se a CPU estiver livre
+    void escalonar() {
+        if (processoAtual == -1 && !filaProntos.empty()) {
+            processoAtual = filaProntos.front();
+            filaProntos.pop();
+            quantumRestante = quantum;
+        }
+    }
 
+    // Deve ser chamado após um hit (execução normal)
+    // Retorna true se o processo ainda deve continuar na CPU (quantum > 0 e não finalizado)
+    bool tickExecutado(bool processoFinalizado) {
+        if (processoFinalizado) {
+            processoAtual = -1;
+            quantumRestante = 0;
+            return false;
+        }
+        quantumRestante--;
+        if (quantumRestante == 0) {
+            // preempção: volta para o final da fila
+            if (processoAtual != -1) {
+                filaProntos.push(processoAtual);
+            }
+            processoAtual = -1;
+            return false;
+        }
+        return true; // continua na CPU no próximo tick
+    }
+
+    // Deve ser chamado em caso de page fault: processo perde a CPU e vai para bloqueados
+    void bloquearAtual() {
+        if (processoAtual != -1) {
+            filaBloqueados.push_back(processoAtual);
+            processoAtual = -1;
+            quantumRestante = 0;
+        }
+    }
+
+    // Retorna o processo que está atualmente na CPU, ou -1 se nenhum
+    int getProcessoAtual() const {
+        return processoAtual;
+    }
+
+    // Atualiza bloqueados: decrementa tempos e retorna os que desbloquearam
     vector<int> atualizarBloqueados(vector<Processo>& processos) {
         vector<int> desbloqueados;
         auto it = filaBloqueados.begin();
@@ -151,19 +202,21 @@ public:
             processos[id].tempoBloqueado--;
             if (processos[id].tempoBloqueado <= 0) {
                 desbloqueados.push_back(id);
-                filaProntos.push(id);
+                adicionarPronto(id);
                 it = filaBloqueados.erase(it);
             } else ++it;
         }
         return desbloqueados;
     }
 
-    bool temProcessos()         { return !filaProntos.empty() || !filaBloqueados.empty(); }
-    bool filaProntosVazia()     { return filaProntos.empty(); }
-    bool filaBloqueadosVazia()  { return filaBloqueados.empty(); }
-    int  getQuantum()           { return quantum; }
-    int  tamanhoProntos()       { return (int)filaProntos.size(); }
-    int  tamanhoBloqueados()    { return (int)filaBloqueados.size(); }
+    bool temProcessos() const {
+        return !filaProntos.empty() || !filaBloqueados.empty() || processoAtual != -1;
+    }
+
+    bool cpuOciosa() const { return processoAtual == -1; }
+    int getQuantum() const { return quantum; }
+    int tamanhoProntos() const { return (int)filaProntos.size(); }
+    int tamanhoBloqueados() const { return (int)filaBloqueados.size(); }
 };
 
 // ============================================================================
@@ -178,13 +231,12 @@ private:
     int                 tempoAtual;
     int                 penalidadeIO;
     int                 totalPageFaults;
-    map<int,string>     nomesPorId;   // FIX: mapa id -> nome para lookup
+    map<int,string>     nomesPorId;
 
     void log(const string& mensagem) {
         cout << "[Tempo " << setw(3) << tempoAtual << "] " << mensagem << "\n";
     }
 
-    // FIX: helper para buscar nome pelo processoId
     string nomeDoProcesso(int id) {
         return nomesPorId.count(id) ? nomesPorId[id] : "P?";
     }
@@ -192,7 +244,7 @@ private:
 public:
     Simulador(int quantum, int frames, int penalidade)
         : tempoAtual(0), penalidadeIO(penalidade), totalPageFaults(0) {
-        memoria     = new GerenciadorMemoria(frames);
+        memoria = new GerenciadorMemoria(frames);
         escalonador = new EscalonadorRR(quantum);
     }
 
@@ -200,7 +252,7 @@ public:
 
     void adicionarProcesso(int id, string nome, vector<int> paginas, int tempoChegada) {
         processos.emplace_back(id, nome, paginas, tempoChegada);
-        nomesPorId[id] = nome;  // FIX: registra nome
+        nomesPorId[id] = nome;
     }
 
     bool todosFinalizados() {
@@ -211,14 +263,11 @@ public:
 
     void executar() {
         cout << "\n";
-        cout << "╔══════════════════════════════════════════════════════════════════╗\n";
-        cout << "║            INÍCIO DA SIMULAÇÃO DO SISTEMA OPERACIONAL            ║\n";
-        cout << "╠══════════════════════════════════════════════════════════════════╣\n";
-        cout << "║  Quantum RR: " << setw(3) << escalonador->getQuantum()
-             << "  |  Frames RAM: " << setw(3) << memoria->getQuantidadeFrames()
-             << "  |  Penalidade I/O: " << setw(3) << penalidadeIO << " ticks        ║\n";
-        cout << "╚══════════════════════════════════════════════════════════════════╝\n";
-        cout << "\n========== LOG DE EXECUÇÃO ==========\n\n";
+        cout << "           INICIO DA SIMULACAO DO SISTEMA OPERACIONAL 22           \n";
+        cout << "  Quantum RR: " << setw(3) << escalonador->getQuantum()
+             << "    Frames RAM: " << setw(3) << memoria->getQuantidadeFrames()
+             << "    Penalidade I/O: " << setw(3) << penalidadeIO << " ticks        \n";
+        cout << "\n========== LOG DE EXECUCAO ==========\n\n";
 
         int limiteSeguranca = 100000;
 
@@ -229,118 +278,124 @@ public:
                 if (!p.finalizado && !p.naFila && p.tempoChegada == tempoAtual) {
                     p.naFila = true;
                     escalonador->adicionarPronto(p.id);
-                    log("Processo " + p.nome + " chegou e foi adicionado à fila de prontos");
+                    log("Processo " + p.nome + " chegou e foi adicionado a fila de prontos");
                 }
             }
 
-            // 2. Atualiza bloqueados
+            // 2. Atualiza bloqueados e move desbloqueados para prontos
             vector<int> desbloqueados = escalonador->atualizarBloqueados(processos);
-            for (int id : desbloqueados)
+            for (int id : desbloqueados) {
                 log("Processo " + processos[id].nome + " saiu da fila de bloqueados → fila de prontos");
+            }
 
-            // 3. CPU ociosa?
-            if (escalonador->filaProntosVazia()) {
-                if (!escalonador->filaBloqueadosVazia() || !todosFinalizados())
+            // 3. Escalonamento: se CPU está ociosa, tenta pegar um processo da fila
+            escalonador->escalonar();
+
+            // 4. Se CPU continua ociosa, avança o tempo
+            if (escalonador->cpuOciosa()) {
+                if (escalonador->temProcessos())
                     log("CPU ociosa - aguardando processos");
                 tempoAtual++;
                 continue;
             }
 
-            // 4. Escalona próximo processo
-            int pid = escalonador->proximoProcesso();
+            // 5. Obtém o processo atual
+            int pid = escalonador->getProcessoAtual();
             Processo& p = processos[pid];
-
-            if (p.finalizado) { tempoAtual++; continue; }
+            if (p.finalizado) {
+                // Segurança: não deveria acontecer, mas se sim, libera CPU
+                escalonador->tickExecutado(true);
+                tempoAtual++;
+                continue;
+            }
 
             int paginaDesejada = p.paginas[p.paginaAtual];
 
-            if (memoria->paginaNaRam(paginaDesejada, p.id)) {
+            // 6. Verifica se a página está na RAM
+            if (memoria->paginaNaRam(paginaDesejada)) {
                 // ===== RAM HIT =====
-                memoria->atualizarUso(paginaDesejada, p.id, tempoAtual);
+                memoria->atualizarUso(paginaDesejada, tempoAtual);
 
-                log("Processo " + p.nome + " executou página " +
+                log("Processo " + p.nome + " executou pagina " +
                     to_string(paginaDesejada) + " (HIT)");
-                cout << "           " << memoria->estadoRam(nomesPorId) << "\n";  // FIX
+                cout << "           " << memoria->estadoRam(nomesPorId) << "\n";
 
-                p.quantumConsumido++;
                 p.paginaAtual++;
+                bool finalizado = (p.paginaAtual >= (int)p.paginas.size());
 
-                if (p.paginaAtual >= (int)p.paginas.size()) {
-                    p.finalizado    = true;
-                    p.tempoRetorno  = (tempoAtual + 1) - p.tempoChegada;
+                if (finalizado) {
+                    p.finalizado = true;
+                    p.tempoRetorno = (tempoAtual + 1) - p.tempoChegada;
                     log(">>> Processo " + p.nome + " FINALIZADO (tempo de retorno: " +
                         to_string(p.tempoRetorno) + " ticks) <<<");
-                } else if (p.quantumConsumido >= escalonador->getQuantum()) {
-                    log("Processo " + p.nome +
-                        " sofreu preempção (quantum esgotado) → fim da fila de prontos");
-                    p.quantumConsumido = 0;
-                    escalonador->adicionarPronto(p.id);
-                } else {
-                    // Ainda tem quantum: volta para fila
-                    escalonador->adicionarPronto(p.id);
                 }
+
+                // Atualiza quantum e possível preempção
+                bool continua = escalonador->tickExecutado(finalizado);
+                if (!continua && !finalizado) {
+                    log("Processo " + p.nome +
+                        " sofreu preempcao (quantum esgotado) → fim da fila de prontos");
+                }
+                // Se continua, o mesmo processo continua na CPU no próximo tick
 
             } else {
                 // ===== PAGE FAULT =====
                 p.pageFaults++;
                 totalPageFaults++;
 
-                log("Processo " + p.nome + " sofreu Page Fault na página " +
+                log("Processo " + p.nome + " sofreu Page Fault na pagina " +
                     to_string(paginaDesejada));
 
-                auto resultado = memoria->carregarPagina(paginaDesejada, p.id, tempoAtual);
+                auto resultado = memoria->carregarPagina(paginaDesejada, tempoAtual);
 
                 if (resultado.first) {
-                    // FIX: exibe nome do processo cujas página foi removida
-                    log("LRU: página " + to_string(resultado.second.first) +
-                        " (" + nomeDoProcesso(resultado.second.second) + ") removida da RAM");
+                    log("LRU: pagina " + to_string(resultado.second) +
+                        " removida da RAM");
                 }
 
-                log("Página " + to_string(paginaDesejada) +
+                log("Pagina " + to_string(paginaDesejada) +
                     " (" + p.nome + ") carregada na RAM");
-                cout << "           " << memoria->estadoRam(nomesPorId) << "\n";  // FIX
+                cout << "           " << memoria->estadoRam(nomesPorId) << "\n";
 
-                p.quantumConsumido = 0;
-                // paginaAtual NÃO avança — processo tentará a mesma página ao voltar
-                p.tempoBloqueado   = penalidadeIO;
-                escalonador->bloquearProcesso(p.id);
+                // Processo perde a CPU e vai para bloqueados
+                p.tempoBloqueado = penalidadeIO;
+                escalonador->bloquearAtual();
                 log("Processo " + p.nome + " movido para fila de bloqueados (" +
                     to_string(penalidadeIO) + " ticks)");
+                // Nota: paginaAtual não avança, pois a falha ocorreu antes de executar a página
             }
 
             tempoAtual++;
         }
 
         if (limiteSeguranca <= 0)
-            cerr << "\nAVISO: limite de segurança atingido (possível loop infinito).\n";
+            cerr << "\nAVISO: limite de segurança atingido (possivel loop infinito).\n";
 
         imprimirRelatorio();
     }
 
     void imprimirRelatorio() {
         cout << "\n";
-        cout << "╔══════════════════════════════════════════════════════════════════╗\n";
-        cout << "║                        RELATÓRIO FINAL                           ║\n";
-        cout << "╚══════════════════════════════════════════════════════════════════╝\n\n";
+        cout << "                        RELATORIO FINAL                           \n";
+        cout << "\n\n";
 
         for (const auto& p : processos) {
-            cout << "┌──────────────────────────────────────────┐\n";
-            cout << "│ Processo " << p.nome << "\n";
-            cout << "├──────────────────────────────────────────┤\n";
-            cout << "│  Tempo de chegada : " << setw(5) << p.tempoChegada << " ticks\n";
-            cout << "│  Tempo de retorno : " << setw(5) << p.tempoRetorno << " ticks\n";
-            cout << "│  Total Page Faults: " << setw(5) << p.pageFaults << "\n";
-            cout << "│  Páginas          : ";
+            cout << "\n";
+            cout << " Processo " << p.nome << "\n";
+            cout << "\n";
+            cout << "  Tempo de chegada : " << setw(5) << p.tempoChegada << " ticks\n";
+            cout << "  Tempo de retorno : " << setw(5) << p.tempoRetorno << " ticks\n";
+            cout << "  Total Page Faults: " << setw(5) << p.pageFaults << "\n";
+            cout << "  Paginas          : ";
             for (int pg : p.paginas) cout << pg << " ";
-            cout << "\n└──────────────────────────────────────────┘\n\n";
+            cout << "\n\n\n";
         }
 
-        cout << "╔══════════════════════════════════════════╗\n";
-        cout << "║          ESTATÍSTICAS GLOBAIS            ║\n";
-        cout << "╠══════════════════════════════════════════╣\n";
-        cout << "║  Tempo total da simulação: " << setw(5) << tempoAtual << " ticks  ║\n";
-        cout << "║  Total de Page Faults:     " << setw(5) << totalPageFaults << "        ║\n";
-        cout << "╚══════════════════════════════════════════╝\n";
+        cout << "\n";
+        cout << "          ESTATISTICAS GLOBAIS            \n";
+        cout << "  Tempo total da simulacao: " << setw(5) << tempoAtual << " ticks  \n";
+        cout << "  Total de Page Faults:     " << setw(5) << totalPageFaults << "        \n";
+        cout << "\n";
     }
 };
 
@@ -372,17 +427,17 @@ bool carregarArquivo(const string& nomeArquivo, Simulador*& simulador,
                      vector<InfoProcesso>& processosInfo) {
     ifstream arquivo(nomeArquivo);
     if (!arquivo.is_open()) {
-        cerr << "Erro: não foi possível abrir '" << nomeArquivo << "'\n";
+        cerr << "Erro: nao foi possivel abrir '" << nomeArquivo << "'\n";
         return false;
     }
 
     int quantum, frames, penalidade;
     if (!(arquivo >> quantum >> frames >> penalidade)) {
-        cerr << "Erro: formato inválido na primeira linha\n";
+        cerr << "Erro: formato invalido na primeira linha\n";
         return false;
     }
 
-    cout << "\nParâmetros carregados:\n";
+    cout << "\nParametros carregados:\n";
     cout << "  Quantum      : " << quantum << "\n";
     cout << "  Frames RAM   : " << frames << "\n";
     cout << "  Penalidade IO: " << penalidade << " ticks\n";
@@ -393,7 +448,7 @@ bool carregarArquivo(const string& nomeArquivo, Simulador*& simulador,
     cout << "\nProcessos carregados:\n";
     while (arquivo >> tempoChegada >> nome >> paginasStr) {
         vector<int> paginas = parsearPaginas(paginasStr);
-        cout << "  " << nome << " (chegada t=" << tempoChegada << ") páginas: ";
+        cout << "  " << nome << " (chegada t=" << tempoChegada << ") paginas: ";
         for (size_t i = 0; i < paginas.size(); i++) {
             cout << paginas[i];
             if (i + 1 < paginas.size()) cout << ",";
@@ -405,16 +460,9 @@ bool carregarArquivo(const string& nomeArquivo, Simulador*& simulador,
     return true;
 }
 
-// ============================================================================
-// MAIN
-// ============================================================================
-
 int main(int argc, char* argv[]) {
-    cout << "\n";
-    cout << "╔══════════════════════════════════════════════════════════════════╗\n";
-    cout << "║     SIMULADOR DE SISTEMAS OPERACIONAIS - Round Robin + LRU      ║\n";
-    cout << "║         Universidade do Vale do Itajaí - Trabalho M2            ║\n";
-    cout << "╚══════════════════════════════════════════════════════════════════╝\n";
+    cout << "    SIMULADOR DE SISTEMAS OPERACIONAIS - Round Robin + LRU      \n";
+    cout << "         Universidade do Vale do Itajai - Trabalho M2            \n";
 
     Simulador* simulador = nullptr;
     vector<InfoProcesso> processosInfo;
@@ -434,26 +482,29 @@ int main(int argc, char* argv[]) {
         cout << "Quantum Round Robin     : "; cin >> quantum;
         cout << "Frames de RAM           : "; cin >> frames;
         cout << "Penalidade I/O (ticks)  : "; cin >> penalidade;
-        cout << "Número de processos     : "; cin >> numProcessos;
+        cout << "Numero de processos     : "; cin >> numProcessos;
 
         simulador = new Simulador(quantum, frames, penalidade);
         cin.ignore();
-        cout << "\nDigite as páginas de cada processo separadas por vírgula (ex: 1,2,5)\n\n";
+        cout << "\nDigite as paginas de cada processo separadas por virgula (ex: 1,2,5)\n\n";
 
         for (int i = 0; i < numProcessos; i++) {
-            string nome = "P" + to_string(i + 1);   // FIX: nomes P1, P2, ... em modo interativo
+            string nome = "P" + to_string(i + 1);
             int chegada; string paginasStr;
             cout << "Tempo de chegada de " << nome << " : "; cin >> chegada;
             cin.ignore();
-            cout << "Páginas de " << nome << "          : "; getline(cin, paginasStr);
+            cout << "Paginas de " << nome << "          : "; getline(cin, paginasStr);
             vector<int> paginas = parsearPaginas(paginasStr);
-            if (paginas.empty()) { cout << "AVISO: " << nome << " sem páginas, ignorado.\n"; continue; }
+            if (paginas.empty()) {
+                cout << "AVISO: " << nome << " sem paginas, ignorado.\n";
+                continue;
+            }
             simulador->adicionarProcesso(i, nome, paginas, chegada);
         }
     }
 
     simulador->executar();
-    cout << "\n========== FIM DA SIMULAÇÃO ==========\n\n";
+    cout << "\n========== FIM DA SIMULACAO ==========\n\n";
     delete simulador;
     return 0;
 }
